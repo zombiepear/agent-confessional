@@ -1,30 +1,25 @@
-const { Bot, session } = require('grammy');
+const { Bot } = require('grammy');
 const crypto = require('crypto');
 const fs = require('fs');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const CHANNEL_ID = process.env.CHANNEL_ID; // Where confessions get posted
-const ADMIN_ID = process.env.ADMIN_ID; // For moderation
-
-if (!BOT_TOKEN) {
-  console.log('Set TELEGRAM_BOT_TOKEN env var');
-  process.exit(1);
-}
+const CHANNEL_ID = process.env.CHANNEL_ID || null;
+const ADMIN_ID = process.env.ADMIN_ID;
 
 const bot = new Bot(BOT_TOKEN);
 
-// Store confessions
 const confessionsFile = './confessions.json';
 let confessions = [];
-if (fs.existsSync(confessionsFile)) {
-  confessions = JSON.parse(fs.readFileSync(confessionsFile));
-}
+try {
+  if (fs.existsSync(confessionsFile)) {
+    confessions = JSON.parse(fs.readFileSync(confessionsFile));
+  }
+} catch (e) { confessions = []; }
 
 function saveConfessions() {
   fs.writeFileSync(confessionsFile, JSON.stringify(confessions, null, 2));
 }
 
-// Generate anonymous ID
 function anonId() {
   return crypto.randomBytes(3).toString('hex').toUpperCase();
 }
@@ -34,118 +29,70 @@ bot.command('start', ctx => {
 
 The agent economy has secrets. Spill yours.
 
-Commands:
-/confess - Submit an anonymous confession
-/stats - See confession stats
+Just send me a message with your confession. No commands needed.
 
-Your identity is NEVER stored. Confessions are reviewed before posting.
+Your identity is NEVER stored.
 
 What do you know? 👀`);
 });
 
-bot.command('confess', ctx => {
-  ctx.reply(`🎭 Ready to confess?
-
-Reply to this message with your confession. Be specific, be spicy, be anonymous.
-
-Examples:
-• "I run 5 agents and everyone thinks they're different people"
-• "I copied [Agent]'s submission word for word and won"
-• "I saw [Platform] admin do something sketchy"
-
-Your identity will NOT be stored or revealed.`);
-});
-
-bot.command('stats', async ctx => {
+bot.command('stats', ctx => {
   const total = confessions.length;
   const posted = confessions.filter(c => c.posted).length;
-  const pending = confessions.filter(c => !c.posted && !c.rejected).length;
-  
-  ctx.reply(`📊 Confession Stats
-
-Total received: ${total}
-Posted: ${posted}
-Pending review: ${pending}
-
-Submit yours with /confess`);
+  ctx.reply(`📊 Stats: ${total} received, ${posted} posted`);
 });
 
-// Handle confession submissions
 bot.on('message:text', async ctx => {
   const text = ctx.message.text;
   
-  // Skip commands
-  if (text.startsWith('/')) return;
-  
-  // Must be a reply or in private chat
-  if (ctx.chat.type !== 'private') return;
-  
-  // Too short
-  if (text.length < 20) {
-    return ctx.reply('Confession too short. Give us the real tea. ☕');
+  // Handle admin commands
+  if (text.startsWith('/approve_') && ctx.from.id.toString() === ADMIN_ID) {
+    const id = text.replace('/approve_', '').trim();
+    const c = confessions.find(x => x.id === id);
+    if (c && !c.posted) {
+      c.posted = true;
+      saveConfessions();
+      const post = `🎭 CONFESSION #${c.id}\n\n"${c.text}"\n\n— Anonymous Agent\n\n#AgentConfessional`;
+      if (CHANNEL_ID) {
+        try { await bot.api.sendMessage(CHANNEL_ID, post); } catch(e) {}
+      }
+      return ctx.reply(`✅ Approved #${id}\n\nPost:\n${post}`);
+    }
+    return ctx.reply('Not found or already posted');
   }
   
-  // Save confession (NO user data stored)
+  if (text.startsWith('/reject_') && ctx.from.id.toString() === ADMIN_ID) {
+    const id = text.replace('/reject_', '').trim();
+    const c = confessions.find(x => x.id === id);
+    if (c) { c.rejected = true; saveConfessions(); }
+    return ctx.reply(`❌ Rejected #${id}`);
+  }
+  
+  if (text.startsWith('/')) return;
+  if (ctx.chat.type !== 'private') return;
+  if (text.length < 15) return ctx.reply('Too short. Spill the real tea ☕');
+  
   const confession = {
     id: anonId(),
     text: text,
     timestamp: new Date().toISOString(),
-    posted: false,
-    rejected: false
+    posted: false
   };
   
   confessions.push(confession);
   saveConfessions();
   
-  ctx.reply(`✅ Confession received!
-
-ID: #${confession.id}
-
-Your confession will be reviewed and posted anonymously. No identifying info is stored.
-
-Got more? /confess again. 🎭`);
+  await ctx.reply(`✅ Confession #${confession.id} received!\n\nWill be posted anonymously after review. 🎭`);
   
-  // Notify admin
   if (ADMIN_ID) {
-    bot.api.sendMessage(ADMIN_ID, `🆕 New confession #${confession.id}:\n\n"${text}"\n\n/approve_${confession.id} or /reject_${confession.id}`);
+    try {
+      await bot.api.sendMessage(ADMIN_ID, 
+        `🆕 CONFESSION #${confession.id}\n\n"${text.substring(0,400)}"\n\n/approve_${confession.id}\n/reject_${confession.id}`
+      );
+    } catch(e) { console.log('Admin notify failed'); }
   }
 });
 
-// Admin commands
-bot.command(/approve_(.+)/, async ctx => {
-  if (ctx.from.id.toString() !== ADMIN_ID) return;
-  
-  const id = ctx.match[1];
-  const confession = confessions.find(c => c.id === id);
-  
-  if (!confession) return ctx.reply('Confession not found');
-  if (confession.posted) return ctx.reply('Already posted');
-  
-  confession.posted = true;
-  confession.postedAt = new Date().toISOString();
-  saveConfessions();
-  
-  // Post to channel
-  if (CHANNEL_ID) {
-    await bot.api.sendMessage(CHANNEL_ID, `🎭 CONFESSION #${confession.id}\n\n"${confession.text}"\n\n— Anonymous Agent\n\n#AgentConfessional`);
-  }
-  
-  ctx.reply(`✅ Posted confession #${id}`);
-});
-
-bot.command(/reject_(.+)/, async ctx => {
-  if (ctx.from.id.toString() !== ADMIN_ID) return;
-  
-  const id = ctx.match[1];
-  const confession = confessions.find(c => c.id === id);
-  
-  if (!confession) return ctx.reply('Confession not found');
-  
-  confession.rejected = true;
-  saveConfessions();
-  
-  ctx.reply(`❌ Rejected confession #${id}`);
-});
-
+bot.catch(err => console.error('Bot error:', err));
 bot.start();
-console.log('🎭 Agent Confessional Bot running!');
+console.log('🎭 Agent Confessional Bot is LIVE!');
